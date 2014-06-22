@@ -93,7 +93,7 @@ def localdir_output(path):
     pass
 
 
-####  API ####
+#### CLIENTS and APIs ####
     
 def mapreduce(\
         slaves=None, \
@@ -115,20 +115,23 @@ def mapreduce(\
 
     #conn.root.map(snakes._serialize_function(snakes.localfile_linereader), snakes._serialize_function(mapf), None, None, snakes._serialize_function(snakes.stdout_output), 2, {'inputfilepath' : i})
 
+def fsput(file_name, local_path):
+    fh = open(local_path)
+
 
 #### SLAVE SERVER ####
 
 class SlaveServer(rpyc.Service):
+
+            ## general utility commands ##
+
     def exposed_ping(self):
         return 'pong'
 
     def on_connect(self):
-        pass
+        print 'someone just connected'
 
-    def exposed_exe(self, serialized_function, args=None):
-        if args == None: args = []
-
-        return _deserialize_function(serialized_function)(*args)
+            ## mapreduce commands ##
 
     def exposed_map(self, \
                     iam, input_func, map_func, \
@@ -167,7 +170,9 @@ class SlaveServer(rpyc.Service):
 
         return True
 
-    def exposed_put(self, file_name, payload):
+               ## file system commands ##
+
+    def exposed_save(self, file_name, payload):
         _pathcheck(file_name)
 
         _mkdirp('storage')
@@ -183,7 +188,7 @@ class SlaveServer(rpyc.Service):
 
         return True
 
-    def exposed_get(self, file_name):
+    def exposed_fetch(self, file_name):
         _pathcheck(file_name)
 
         return open(path.join('storage', file_name)).read()
@@ -204,16 +209,7 @@ class SlaveServer(rpyc.Service):
 
         return True
 
-
-#### MASTER SERVER ####
-
-class MasterServer(rpyc.Service):
-    def exposed_ping(self):
-        return 'pong'
-
-    def exposed_slaves(self):
-        pass
-
+                              ## slave code ends here ##
 
 #### MAIN ####
 
