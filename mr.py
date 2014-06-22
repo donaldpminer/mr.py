@@ -1,6 +1,5 @@
 #!/usr/bin/env python
 
-import flask
 import marshal
 import types
 import sys
@@ -11,10 +10,13 @@ import os.path as path
 import hashlib
 import rpyc
 from rpyc.utils.server import ForkingServer
+import redis
 
 #### CONFIG ####
 
-
+REDIS_HOST = 'localhost'
+REDIS_PORT = 6379
+DB = 'mrpy'
 
 #### UTIL FUNCTIONS ####
 
@@ -54,10 +56,11 @@ def _pathcheck(file_name):
         if not c.isalnum():
             raise ValueError("This file name '%s' is not valid, we only accept letters or numbers")
 
+def _get_redis():
+    return redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB)
+
 #### STANDARD LIBRARY ####
 
-def Reducer(object):
-    pass
 
 def empty_input(params):
     return
@@ -89,6 +92,7 @@ def devnull_output(reducer_number, payload):
 def localdir_output(path):
     pass
 
+
 ####  API ####
     
 def mapreduce(\
@@ -112,9 +116,9 @@ def mapreduce(\
     #conn.root.map(snakes._serialize_function(snakes.localfile_linereader), snakes._serialize_function(mapf), None, None, snakes._serialize_function(snakes.stdout_output), 2, {'inputfilepath' : i})
 
 
-#### SERVER ####
+#### SLAVE SERVER ####
 
-class Server(rpyc.Service):
+class SlaveServer(rpyc.Service):
     def exposed_ping(self):
         return 'pong'
 
@@ -191,7 +195,7 @@ class Server(rpyc.Service):
 
         return True
 
-    def exposed_copyremote(self, file_name, destination):
+    def exposed_pushremote(self, file_name, destination):
         _pathcheck(file_name)
 
         c = rpyc.connect(*destination)
@@ -200,17 +204,28 @@ class Server(rpyc.Service):
 
         return True
 
+
+#### MASTER SERVER ####
+
+class MasterServer(rpyc.Service):
+    def exposed_ping(self):
+        return 'pong'
+
+    def exposed_slaves(self):
+        pass
+
+
 #### MAIN ####
 
 if __name__ == "__main__":
     if len(sys.argv) <= 1:
         print 'asf'
-    elif sys.argv[1] == 'server':
+    elif sys.argv[1] == 'slave':
         data_dir = path.abspath(sys.argv[3])
         _mkdirp(data_dir)
         os.chdir(data_dir)
 
-        server = ForkingServer(Server, port=int(sys.argv[2]))
+        server = ForkingServer(SlaveServer, port=int(sys.argv[2]))
 
         server.start()
     else:

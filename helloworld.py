@@ -13,6 +13,6 @@ def mapf(k, v, params):
 conn = rpyc.connect('localhost', 52485)
 
 for i in inputs:
-    conn.root.map('b', snakes._serialize_function(snakes.localfile_linereader), snakes._serialize_function(mapf), snakes._serialize_function(snakes.identity_reducer), snakes._serialize_function(snakes.hash_partitioner), snakes._serialize_function(snakes.stdout_kv_output), 2, {'inputfilepath' : i})
+    conn.root.map('b', mr._serialize_function(mr.localfile_linereader), mr._serialize_function(mapf), mr._serialize_function(mr.identity_reducer), mr._serialize_function(mr.hash_partitioner), mr._serialize_function(mr.stdout_kv_output), 2, {'inputfilepath' : i})
 
 
