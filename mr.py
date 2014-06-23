@@ -11,12 +11,18 @@ import hashlib
 import rpyc
 from rpyc.utils.server import ForkingServer
 import redis
+import errno
+from socket import gethostname
+import time
+from threading import Thread
+import logging
+logging.basicConfig()
 
 #### CONFIG ####
 
 REDIS_HOST = 'localhost'
 REDIS_PORT = 6379
-DB = 'mrpy'
+REDIS_DB = 'mrpy'
 
 #### UTIL FUNCTIONS ####
 
@@ -42,14 +48,13 @@ def _group_sorted(list_of_kv):
 
     yield cur_k, cur_vs
 
-def _mkdirp(dpath):
+def _mkdirp(path):
     try:
-        os.mkdir(dpath)
-    except OSError, e:
-        if e.errno == 17:  # already exists
+        os.makedirs(path)
+    except OSError as exc:
+        if exc.errno == errno.EEXIST and os.path.isdir(path):
             pass
-        else:
-            raise e
+        else: raise
 
 def _pathcheck(file_name):
     for c in file_name:
@@ -58,6 +63,12 @@ def _pathcheck(file_name):
 
 def _get_redis():
     return redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB)
+
+def _get_timestamp():
+    return time.time()
+
+def _cat_host(hostname, port):
+    return str(hostname) + ':' + str(port)
 
 #### STANDARD LIBRARY ####
 
@@ -95,6 +106,29 @@ def localdir_output(path):
 
 #### CLIENTS and APIs ####
     
+
+def slaves(timeout=10):
+    slave_dict = _get_redis().hgetall('slaves')
+    curtime = _get_timestamp()
+
+    out_hosts = []
+
+    for host in slave_dict:
+        if float(slave_dict[host]) + timeout < curtime:
+            h,p = host.split(':')
+            try:
+                c = rpyc.connect(h, int(p))
+                c.root.register()
+            except Exception as e:
+                print 'something seems wrong with', host, e
+                print 'im going to delete', host, 'from the registry'
+                _unregister(h, p)
+                continue
+
+        out_hosts.append(host)
+
+    return out_hosts
+
 def mapreduce(\
         slaves=None, \
         mapinput_f=empty_input, \
@@ -119,7 +153,47 @@ def fsput(file_name, local_path):
     fh = open(local_path)
 
 
+#### NAMENODE OPS ####
+
+def _NN_register_file(hostname, port, file_name):
+    # tell the register host:port has a file
+    _get_redis().hset('file-' + file_name, _cat_host(hostname, port), _get_timestamp())
+
+def _NN_check_exists(file_name):
+    return _get_redis().exists('file-' + file_name)
+
 #### SLAVE SERVER ####
+
+def _register(hostname, port):
+    ts = _get_timestamp()
+
+    _get_redis().hset("slaves", \
+            _cat_host(hostname, port), \
+            ts)
+ 
+    return ts
+
+def _unregister(hostname, port):
+    _get_redis().hdel('slaves', _cat_host(hostname, port))
+
+def start_slave(port, data_dir):
+
+    # set up data directory
+    data_dir = path.abspath(data_dir)
+    _mkdirp(data_dir)
+    os.chdir(data_dir)
+
+    # store some config for later
+    #  (i don't really have anywhere better to put it)
+    SlaveServer._port = int(port)
+    SlaveServer._hostname = gethostname()
+    SlaveServer._datadir = data_dir
+
+    s = ForkingServer(SlaveServer, port=int(port))
+    _register(SlaveServer._hostname, SlaveServer._port)
+    s.start()
+
+    _unregister(SlaveServer._hostname, SlaveServer._port)
 
 class SlaveServer(rpyc.Service):
 
@@ -130,6 +204,17 @@ class SlaveServer(rpyc.Service):
 
     def on_connect(self):
         print 'someone just connected'
+
+        self.exposed_register()
+
+    def on_disconnect(self):
+        print 'someone just disconnceted'
+
+        self.exposed_register()
+
+    def exposed_register(self):
+        # register with redis registry
+        _register(self._hostname, self._port)
 
             ## mapreduce commands ##
 
@@ -173,6 +258,7 @@ class SlaveServer(rpyc.Service):
                ## file system commands ##
 
     def exposed_save(self, file_name, payload):
+
         _pathcheck(file_name)
 
         _mkdirp('storage')
@@ -185,6 +271,8 @@ class SlaveServer(rpyc.Service):
         of = open(opath, 'w')
         of.write(payload)
         of.close()
+
+        _NN_register_file(SlaveServer._hostname, SlaveServer._port, file_name)
 
         return True
 
@@ -217,12 +305,7 @@ if __name__ == "__main__":
     if len(sys.argv) <= 1:
         print 'asf'
     elif sys.argv[1] == 'slave':
-        data_dir = path.abspath(sys.argv[3])
-        _mkdirp(data_dir)
-        os.chdir(data_dir)
+        start_slave(sys.argv[2], sys.argv[3])
 
-        server = ForkingServer(SlaveServer, port=int(sys.argv[2]))
-
-        server.start()
     else:
         print 'you did something wrong'
