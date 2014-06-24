@@ -16,6 +16,10 @@ from socket import gethostname
 import time
 from threading import Thread
 import logging
+import random
+
+
+
 logging.basicConfig()
 
 #### CONFIG ####
@@ -23,6 +27,10 @@ logging.basicConfig()
 REDIS_HOST = 'localhost'
 REDIS_PORT = 6379
 REDIS_DB = 'mrpy'
+
+USE_SLAVES_CACHE = True
+
+REPLICATION_FACTOR = 3
 
 #### UTIL FUNCTIONS ####
 
@@ -70,8 +78,23 @@ def _get_timestamp():
 def _cat_host(hostname, port):
     return str(hostname) + ':' + str(port)
 
-#### STANDARD LIBRARY ####
+def _split_hostport(hostnameport):
+    h, p = hostnameport.split(':')
+    return h, int(p)
 
+def _connect(hostname, port):
+    try:
+        a = rpyc.connect(str(hostname), int(port))
+    except Exception as e:
+        print 'there was a problem connecting to', hostname, port, ':', e
+        print '   ... i\'m going to unregister it'
+
+        _unregister(hostname, port)
+
+    return a
+
+
+#### STANDARD LIBRARY ####
 
 def empty_input(params):
     return
@@ -105,9 +128,17 @@ def localdir_output(path):
 
 
 #### CLIENTS and APIs ####
-    
 
-def slaves(timeout=10):
+_SLAVES_CACHE = None
+_SLAVES_CACHE_TS = 0
+
+def slaves(timeout=30, cache_expire=60):
+    global _SLAVES_CACHE
+    global _SLAVES_CACHE_TS
+
+    if USE_SLAVES_CACHE and _get_timestamp() < _SLAVES_CACHE_TS + cache_expire:
+        return _SLAVES_CACHE
+
     slave_dict = _get_redis().hgetall('slaves')
     curtime = _get_timestamp()
 
@@ -117,7 +148,7 @@ def slaves(timeout=10):
         if float(slave_dict[host]) + timeout < curtime:
             h,p = host.split(':')
             try:
-                c = rpyc.connect(h, int(p))
+                c = _connect(h, int(p))
                 c.root.register()
             except Exception as e:
                 print 'something seems wrong with', host, e
@@ -127,49 +158,63 @@ def slaves(timeout=10):
 
         out_hosts.append(host)
 
+    _SLAVES_CACHE = out_hosts
+    _SLAVES_CACHE_TS = _get_timestamp()
+
     return out_hosts
 
-def mapreduce(\
-        slaves=None, \
-        mapinput_f=empty_input, \
-        map_f=identity_mapper, \
-        mapcombiner_f=None, \
-        mappartitioner_f=hash_partitioner, \
-        mapoutput_f=stdout_kv_output, \
-        redinput_f=None, \
-        red_f=None, \
-        redoutput_f=None):
-    pass
-    #if params is None: params = {}
-
-    #conns = [ rpyc.connect(str(ip), int(port)) for ip, port in slaves ]
-
-    #mapid = 0
-    #for 
-
-    #conn.root.map(snakes._serialize_function(snakes.localfile_linereader), snakes._serialize_function(mapf), None, None, snakes._serialize_function(snakes.stdout_output), 2, {'inputfilepath' : i})
-
-def fsput(file_name, local_path):
-    fh = open(local_path)
 
 
-#### NAMENODE OPS ####
+#### FILE SYSTEM OPS ####
 
-def _NN_register_file(hostname, port, file_name):
+def _register_file(hostname, port, file_name):
     # tell the register host:port has a file
     _get_redis().hset('file-' + file_name, _cat_host(hostname, port), _get_timestamp())
 
-def _NN_check_exists(file_name):
+def _unregister_file(hostname, port, file_name):
+    # tell the register that host:port no longer has a file
+    _get_redis().hdel('file-' + file_name, _cat_host(hostname, port))
+
+def check_exists(file_name):
     return _get_redis().exists('file-' + file_name)
+
+def who_has(file_name):
+    if not check_exists(file_name):
+        raise OSError('The file "%s" does not exist' % file_name)
+
+    return _get_redis().hkeys('file-' + file_name)
+
+def write(file_name, payload):
+    if check_exists(file_name):
+        raise OSError('The file "%s" already exists' % file_name)
+
+    a = _connect(*_split_hostport(random.choice(slaves())))
+    a.root.save(file_name, payload)
+
+def put(file_name, local_file):
+    write(file_name, open(local_file).read())
+
+def delete(file_name):
+    for hostport in who_has(file_name):
+        a = _connect(*_split_hostport(hostport))
+        a.root.delete(file_name)
+
+def read(file_name):
+    if not check_exists(file_name):
+        raise OSError('The file "%s" does not exist' % file_name)
+
+    a = _connect(*_split_hostport(random.choice(who_has(file_name))))
+    return a.root.fetch(file_name)
+
+def get(file_name, local_file):
+    open(local_file, 'w').write(read(file_name))
 
 #### SLAVE SERVER ####
 
 def _register(hostname, port):
     ts = _get_timestamp()
 
-    _get_redis().hset("slaves", \
-            _cat_host(hostname, port), \
-            ts)
+    _get_redis().hset("slaves", _cat_host(hostname, port), ts)
  
     return ts
 
@@ -209,8 +254,6 @@ class SlaveServer(rpyc.Service):
 
     def on_disconnect(self):
         print 'someone just disconnceted'
-
-        self.exposed_register()
 
     def exposed_register(self):
         # register with redis registry
@@ -257,7 +300,7 @@ class SlaveServer(rpyc.Service):
 
                ## file system commands ##
 
-    def exposed_save(self, file_name, payload):
+    def exposed_save(self, file_name, payload, replicate=(REPLICATION_FACTOR - 1)):
 
         _pathcheck(file_name)
 
@@ -272,7 +315,14 @@ class SlaveServer(rpyc.Service):
         of.write(payload)
         of.close()
 
-        _NN_register_file(SlaveServer._hostname, SlaveServer._port, file_name)
+        _register_file(SlaveServer._hostname, SlaveServer._port, file_name)
+
+        if replicate > 0:
+            # select a replication target of someone other than someone who has it
+            target = random.sample(set(slaves()) - set(who_has(file_name)), 1)[0]
+
+            c = _connect(*_split_hostport(target))
+            c.root.save(file_name, payload, replicate - 1)
 
         return True
 
@@ -284,6 +334,7 @@ class SlaveServer(rpyc.Service):
     def exposed_delete(self, file_name):
         _pathcheck(file_name)
 
+        _unregister_file(SlaveServer._hostname, SlaveServer._port, file_name)
         os.remove(path.join('storage', file_name))
 
         return True
@@ -291,9 +342,8 @@ class SlaveServer(rpyc.Service):
     def exposed_pushremote(self, file_name, destination):
         _pathcheck(file_name)
 
-        c = rpyc.connect(*destination)
-
-        c.root.put(file_name, open(path.join('storage', file_name)).read())
+        c = _connect(*destination)
+        c.root.save(file_name, open(path.join('storage', file_name)).read())
 
         return True
 
