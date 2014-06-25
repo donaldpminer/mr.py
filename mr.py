@@ -15,6 +15,7 @@ from socket import gethostname
 import time
 import logging
 import random
+from multiprocessing import Process
 
 
 
@@ -177,7 +178,7 @@ def slaves(timeout=30, cache_expire=60):
     _SLAVES_CACHE = out_hosts
     _SLAVES_CACHE_TS = _get_timestamp()
 
-    return out_hosts
+    return sorted(out_hosts)
 
 def random_slave(*k, **kv):
     return random.choice(slaves(*k, **kv))
@@ -273,6 +274,19 @@ def start_slave(port, data_dir):
     s.start()
 
     _unregister(SlaveServer._hostname, SlaveServer._port)
+
+def start_slaves(start_port, data_dir_root, num_slaves):
+    ports = range(int(start_port), int(start_port) + int(num_slaves))
+    processes = []
+    for port in ports:
+        p = Process(target=start_slave, args=(port, data_dir_root + str(port)))
+        p.start()
+        processes.append(p)
+
+    for p in processes:
+        p.join()
+
+
 
 class SlaveServer(rpyc.Service):
 
@@ -392,6 +406,8 @@ if __name__ == "__main__":
         print 'asf'
     elif sys.argv[1] == 'slave':
         start_slave(sys.argv[2], sys.argv[3])
+    elif sys.argv[1] == 'slaves':
+        start_slaves(sys.argv[2], sys.argv[3], sys.argv[4])
 
     else:
         print 'you did something wrong'
