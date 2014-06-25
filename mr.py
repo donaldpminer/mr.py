@@ -55,17 +55,26 @@ def _group_sorted(list_of_kv):
     yield cur_k, cur_vs
 
 def _mkdirp(path):
+    path = path.strip()
+    if len(path) == 0:
+        return
+
     try:
         os.makedirs(path)
     except OSError as exc:
         if exc.errno == errno.EEXIST and os.path.isdir(path):
             pass
-        else: raise
+        else:
+            raise exc
 
 def _pathcheck(file_name):
-    for c in file_name:
-        if not c.isalnum():
-            raise ValueError("This file name '%s' is not valid, we only accept letters or numbers")
+    file_name = file_name.strip()
+    if len(file_name) == 0:
+        raise ValueError("The file name cannot be empty")
+
+    for token in file_name.split('/'):
+        if not token.isalnum():
+            raise ValueError("This file name '%s' is not valid, we only accept letters or numbers that are unempty" % file_name)
 
 def _get_redis():
     return redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB)
@@ -123,6 +132,9 @@ def stdout_kv_output(reducer_number, payload, params):
     print marshal.dumps(payload)
     print "=" * 40
     print
+
+def dfs_linewriter(reducer_number, payload, params):
+    write('%s/map/%s/%s' % (params['outputdir'], params['inputfilepath'], reducer_number), marshal.dumps(payload))
 
 def devnull_output(reducer_number, payload):
     pass # "pass" is intentional. this is not a stub.
@@ -228,7 +240,7 @@ def get(file_name, local_file):
     open(local_file, 'w').write(read(file_name))
 
 def ls(file_glob = '*'):
-    return [ f.split('-', 1)[1] for f in _get_redis().keys('file-' + file_glob) ]
+    return sorted( f.split('-', 1)[1] for f in _get_redis().keys('file-' + file_glob) )
 
 
 #### SLAVE SERVER ####
@@ -284,7 +296,7 @@ class SlaveServer(rpyc.Service):
             ## mapreduce commands ##
 
     def exposed_map(self, \
-                    iam, input_func, map_func, \
+                    input_func, map_func, \
                     combiner_func, partitioner_func, \
                     output_func, num_reducers, params):
 
@@ -320,6 +332,7 @@ class SlaveServer(rpyc.Service):
 
         return True
 
+
                ## file system commands ##
 
     def exposed_save(self, file_name, payload, replicate=(REPLICATION_FACTOR - 1)):
@@ -333,6 +346,7 @@ class SlaveServer(rpyc.Service):
             raise OSError("The file '%s' already exists" % file_name)
             return False
 
+        _mkdirp(path.split(opath)[0])
         of = open(opath, 'w')
         of.write(payload)
         of.close()
