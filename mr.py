@@ -4,7 +4,6 @@ import marshal
 import types
 import sys
 import glob
-from collections import defaultdict
 import os
 import os.path as path
 import hashlib
@@ -14,7 +13,6 @@ import redis
 import errno
 from socket import gethostname
 import time
-from threading import Thread
 import logging
 import random
 
@@ -82,7 +80,10 @@ def _split_hostport(hostnameport):
     h, p = hostnameport.split(':')
     return h, int(p)
 
-def _connect(hostname, port):
+def _connect(hostname, port=None):
+    if port is None:
+        hostname, port = hostname.split(':')
+
     try:
         a = rpyc.connect(str(hostname), int(port))
     except Exception as e:
@@ -112,6 +113,9 @@ def hash_partitioner(value, num_reducers, params):
 
 def localfile_linereader(params):
     return enumerate(open(params['inputfilepath']).xreadlines())
+
+def dfs_linereader(params):
+    return enumerate(read(params['inputfilepath']).splitlines())
 
 def stdout_kv_output(reducer_number, payload, params):
     print "=" * 40
@@ -163,7 +167,8 @@ def slaves(timeout=30, cache_expire=60):
 
     return out_hosts
 
-
+def random_slave(*k, **kv):
+    return random.choice(slaves(*k, **kv))
 
 #### FILE SYSTEM OPS ####
 
@@ -176,30 +181,41 @@ def _unregister_file(hostname, port, file_name):
     _get_redis().hdel('file-' + file_name, _cat_host(hostname, port))
 
 def check_exists(file_name):
+    _pathcheck(file_name)
     return _get_redis().exists('file-' + file_name)
 
 def who_has(file_name):
+    _pathcheck(file_name)
+
     if not check_exists(file_name):
         raise OSError('The file "%s" does not exist' % file_name)
 
     return _get_redis().hkeys('file-' + file_name)
 
 def write(file_name, payload):
+    _pathcheck(file_name)
+
     if check_exists(file_name):
         raise OSError('The file "%s" already exists' % file_name)
 
     a = _connect(*_split_hostport(random.choice(slaves())))
     a.root.save(file_name, payload)
 
-def put(file_name, local_file):
+def put(local_file, file_name):
+    _pathcheck(file_name)
+
     write(file_name, open(local_file).read())
 
 def delete(file_name):
+    _pathcheck(file_name)
+
     for hostport in who_has(file_name):
         a = _connect(*_split_hostport(hostport))
         a.root.delete(file_name)
 
 def read(file_name):
+    _pathcheck(file_name)
+
     if not check_exists(file_name):
         raise OSError('The file "%s" does not exist' % file_name)
 
@@ -207,7 +223,13 @@ def read(file_name):
     return a.root.fetch(file_name)
 
 def get(file_name, local_file):
+    _pathcheck(file_name)
+
     open(local_file, 'w').write(read(file_name))
+
+def ls(file_glob = '*'):
+    return [ f.split('-', 1)[1] for f in _get_redis().keys('file-' + file_glob) ]
+
 
 #### SLAVE SERVER ####
 
