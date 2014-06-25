@@ -25,7 +25,7 @@ logging.basicConfig()
 
 REDIS_HOST = 'localhost'
 REDIS_PORT = 6379
-REDIS_DB = 'mrpy'
+REDIS_DB = '10'
 
 USE_SLAVES_CACHE = True
 
@@ -137,14 +137,19 @@ def stdout_kv_output(reducer_number, payload, params):
     print "=" * 40
     print
 
-def dfs_linewriter(reducer_number, payload, params):
-    write('%s/map/%s/%s' % (params['outputdir'], params['inputfilepath'], reducer_number), marshal.dumps(payload))
+def basic_mapoutput(reducer_number, payload, params):
+    write('%s/tmp/%s/%s' % (params['outputdir'], reducer_number, params['inputfilepath']), marshal.dumps(payload))
+
+def dfs_line_output(reducer_number, payload, params):
+    out_str = '\n'.join( str(k) + '\t' + str(v) for k, v in payload )
+
+    write('%s/reduce%s' % (params['outputdir'], str(reducer_number).zfill(6)), out_str)
 
 def devnull_output(reducer_number, payload, params):
     pass # "pass" is intentional. this is not a stub.
 
 def basic_shuffle(reducer_number, params):
-    inputs = ls('%s/map/*/%d' % (params['outputdir'], int(reducer_number)))
+    inputs = ls('%s/tmp/%d/*' % (params['outputdir'], int(reducer_number)))
 
     return [ marshal.loads(read(inp)) for inp in inputs ]
 
@@ -156,8 +161,6 @@ def basic_sort(mapper_outputs, params):
     a = []
     for p in merge(mapper_outputs):
         a.append(p)
-
-    print len(a), '!!'
 
     for k, v in merge(*mapper_outputs):
         if cur_k is None:
@@ -270,10 +273,17 @@ def delete(file_name):
             a.root.delete(file_name)
         except Exception as e:
             print "I tried to delete", file_name, "from", hostport, "but he seems to be gone... I'm going to unregister this file from this host."
+
             _unregister_file( *(_split_hostport(hostport) + (file_name,)) )
+
+def deletes(file_glob):
+    files_to_del = _get_redis().keys('file-' + file_glob)
+    for f in files_to_del:
+        delete(f.split('-', 1)[1])
 
 def rmdir(directory_name):
     files_to_del = _get_redis().keys('file-' + directory_name.rstrip('/') + '/*')
+    if len(files_to_del) == 0: raise OSError(directory_name + ' does not exist')
     for f in files_to_del:
         delete(f.split('-', 1)[1])
 
@@ -305,6 +315,74 @@ def ll(file_glob = '*'):
         output.append((fn, who_has(fn)) )
 
     return sorted(output)
+
+#### MAPREDUCE ####
+
+def mapreduce(inputs, output_dir, \
+    input_func=dfs_linereader, map_func=identity_mapper, \
+    combiner_func=identity_reducer, partitioner_func=hash_partitioner, \
+    mapout_func=basic_mapoutput, \
+    shuffle_func=basic_shuffle, sort_func=basic_sort, \
+    reduce_func=identity_reducer, output_func=dfs_line_output, \
+    num_reducers=1, params=None):
+
+    sf = _serialize_function # in retrospect, this function name was too long
+
+    sif = sf(input_func)
+    smf = sf(map_func)
+    scf = sf(combiner_func)
+    spf = sf(partitioner_func)
+    smof = sf(mapout_func)
+    sshf = sf(shuffle_func)
+    ssof = sf(sort_func)
+    srf = sf(reduce_func)
+    sof = sf(output_func)
+    if params is None: params = {}
+
+    params['outputdir'] = output_dir
+
+
+    print 'map stage starting'
+
+    map_tasks = []
+    for ins in inputs:
+        for f in ls(ins):
+            params['inputfilepath'] = f
+            p = Process(target=_start_map, args=(sif, smf, scf, spf, smof, num_reducers, params))
+            p.start()
+            map_tasks.append(p)
+
+    for p in map_tasks:
+        p.join()
+
+    print 'map stage complete'
+
+    print 'reduce stage starting'
+
+    reduce_tasks = []
+    for ri in range(num_reducers):
+        p = Process(target=_start_reduce, args=(ri, sshf, ssof, srf, sof, params))
+        p.start()
+        reduce_tasks.append(p)
+
+    for p in reduce_tasks:
+        p.join()
+
+    print 'reduce stage complete'
+    
+
+
+def _start_map(input_func, map_func, combiner_func, partitioner_func, mapout_func, num_reducers, params):
+
+    conn = _connect(random.choice(who_has(params['inputfilepath'])))
+
+    conn.root.map(input_func, map_func, combiner_func, partitioner_func, mapout_func, num_reducers, params)
+
+def _start_reduce(reducer_num, shuffle_func, sort_func, reduce_func, output_func, params):
+
+    conn = _connect(random_slave())
+
+    conn.root.reduce(reducer_num, shuffle_func, sort_func, reduce_func, output_func, params)
 
 
 #### SLAVE SERVER ####
@@ -410,18 +488,26 @@ class SlaveServer(rpyc.Service):
 
 
     def exposed_reduce(self, \
-                    input_func, sort_func, reduce_func, \
+                    reducer_num, shuffle_func, sort_func, reduce_func, \
                     output_func, params):
 
                ## file system commands ##
-        pass
+        shuffle_func = _deserialize_function(shuffle_func)
+        sort_func = _deserialize_function(sort_func)
+        reduce_func = _deserialize_function(reduce_func)
+        output_func = _deserialize_function(output_func)
 
+        reduce_out = []
+        for k, vs in sort_func(shuffle_func(reducer_num, params), params):
+            for k, v in reduce_func(k, vs, params):
+                reduce_out.append((k, v))
+
+        output_func(reducer_num, reduce_out, params)
+        
 
     def exposed_save(self, file_name, payload, replicate=(REPLICATION_FACTOR - 1)):
 
         _pathcheck(file_name)
-
-
 
         opath = path.join(self._datadir, 'storage', file_name)
         if path.exists(opath):

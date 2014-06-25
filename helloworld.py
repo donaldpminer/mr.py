@@ -11,7 +11,7 @@ except OSError as ose:
     print 'tried to delete readme but it wasnt there', ose
 
 try:
-    mr.rmdir('helloout/')
+    mr.rmdir('wordcount/')
 except OSError as ose:
     print 'tried to delete helloout/ but i couldnt', ose
 
@@ -22,24 +22,14 @@ def mapf(k, v, params):
     for tok in v.strip().split():
         yield (tok.lower(), 1)
 
+def reducef(k, vs, params):
+    yield k, sum(vs)
 
-conn = mr._connect(mr.random_slave())
-
-sf = mr._serialize_function
-
-print 'premap', mr.ls()
-
-conn.root.map(sf(mr.dfs_linereader), sf(mapf), sf(mr.identity_reducer), sf(mr.hash_partitioner), sf(mr.dfs_linewriter), 2, \
-{'inputfilepath' : 'LICENSE', 'outputdir' : 'helloout'})
-
-
-conn.root.map(sf(mr.dfs_linereader), sf(mapf), sf(mr.identity_reducer), sf(mr.hash_partitioner), sf(mr.dfs_linewriter), 2, \
-{'inputfilepath' : 'README', 'outputdir' : 'helloout'})
-
-
-print 'postmap', mr.ls()
-
-
-
-for k in mr.basic_sort(mr.basic_shuffle(1, {'outputdir':'helloout'}), {}):
-    print k
+mr.mapreduce(\
+    inputs = ['LICENSE', 'README'], \
+    output_dir = 'wordcount', \
+    map_func = mapf, \
+    reduce_func = reducef,
+    num_reducers=3)
+    
+print mr.read('wordcount/reduce000000')
