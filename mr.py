@@ -16,7 +16,7 @@ import time
 import logging
 import random
 from multiprocessing import Process
-
+from heapq import merge
 
 
 logging.basicConfig()
@@ -96,13 +96,16 @@ def _connect(hostname, port=None):
 
     try:
         a = rpyc.connect(str(hostname), int(port))
+        return a
     except Exception as e:
         print 'there was a problem connecting to', hostname, port, ':', e
         print '   ... i\'m going to unregister it'
 
         _unregister(hostname, port)
 
-    return a
+        raise e
+
+    
 
 
 #### STANDARD LIBRARY ####
@@ -137,12 +140,37 @@ def stdout_kv_output(reducer_number, payload, params):
 def dfs_linewriter(reducer_number, payload, params):
     write('%s/map/%s/%s' % (params['outputdir'], params['inputfilepath'], reducer_number), marshal.dumps(payload))
 
-def devnull_output(reducer_number, payload):
+def devnull_output(reducer_number, payload, params):
     pass # "pass" is intentional. this is not a stub.
 
-def localdir_output(path):
-    pass
+def basic_shuffle(reducer_number, params):
+    inputs = ls('%s/map/*/%d' % (params['outputdir'], int(reducer_number)))
 
+    return [ marshal.loads(read(inp)) for inp in inputs ]
+
+def basic_sort(mapper_outputs, params):
+    # mapper_outputs is a list of k,v sets that are sorted
+    cur_vs = []
+    cur_k = None
+
+    a = []
+    for p in merge(mapper_outputs):
+        a.append(p)
+
+    print len(a), '!!'
+
+    for k, v in merge(*mapper_outputs):
+        if cur_k is None:
+            cur_k = k
+
+        if cur_k != k:
+            yield cur_k, cur_vs
+            cur_k = k
+            cur_vs = []
+
+        cur_vs.append(v)
+
+    yield cur_k, cur_vs
 
 #### CLIENTS and APIs ####
 
@@ -187,11 +215,23 @@ def random_slave(*k, **kv):
 
 def _register_file(hostname, port, file_name):
     # tell the register host:port has a file
-    _get_redis().hset('file-' + file_name, _cat_host(hostname, port), _get_timestamp())
+    r = _get_redis()
+
+    r.hset('file-' + file_name, _cat_host(hostname, port), _get_timestamp())
+    # we need to have a dummy value because otherwise redis throws away the file
+    #  once it has zero replicas
+    r.hset('file-' + file_name, '!', '!') 
 
 def _unregister_file(hostname, port, file_name):
     # tell the register that host:port no longer has a file
     _get_redis().hdel('file-' + file_name, _cat_host(hostname, port))
+
+def format_fs(are_you_sure=False):
+    if not are_you_sure:
+        raise ValueError("you have to call format_fs(are_you_sure=True) in order to format")
+
+    for f in ls():
+        delete(f)
 
 def check_exists(file_name):
     _pathcheck(file_name)
@@ -203,7 +243,7 @@ def who_has(file_name):
     if not check_exists(file_name):
         raise OSError('The file "%s" does not exist' % file_name)
 
-    return _get_redis().hkeys('file-' + file_name)
+    return [ h for h in _get_redis().hkeys('file-' + file_name) if h != '!' ]
 
 def write(file_name, payload):
     _pathcheck(file_name)
@@ -222,9 +262,20 @@ def put(local_file, file_name):
 def delete(file_name):
     _pathcheck(file_name)
 
+    _get_redis().hdel('file-' + file_name, '!')
+
     for hostport in who_has(file_name):
-        a = _connect(*_split_hostport(hostport))
-        a.root.delete(file_name)
+        try:
+            a = _connect(*_split_hostport(hostport))
+            a.root.delete(file_name)
+        except Exception as e:
+            print "I tried to delete", file_name, "from", hostport, "but he seems to be gone... I'm going to unregister this file from this host."
+            _unregister_file( *(_split_hostport(hostport) + (file_name,)) )
+
+def rmdir(directory_name):
+    files_to_del = _get_redis().keys('file-' + directory_name.rstrip('/') + '/*')
+    for f in files_to_del:
+        delete(f.split('-', 1)[1])
 
 def read(file_name):
     _pathcheck(file_name)
@@ -241,7 +292,19 @@ def get(file_name, local_file):
     open(local_file, 'w').write(read(file_name))
 
 def ls(file_glob = '*'):
-    return sorted( f.split('-', 1)[1] for f in _get_redis().keys('file-' + file_glob) )
+    output = []
+    for f in _get_redis().keys('file-' + file_glob):
+        output.append(f.split('-', 1)[1])
+
+    return sorted(output)
+
+def ll(file_glob = '*'):
+    output = []
+    for f in _get_redis().keys('file-' + file_glob):
+        fn = f.split('-', 1)[1]
+        output.append((fn, who_has(fn)) )
+
+    return sorted(output)
 
 
 #### SLAVE SERVER ####
@@ -261,13 +324,14 @@ def start_slave(port, data_dir):
     # set up data directory
     data_dir = path.abspath(data_dir)
     _mkdirp(data_dir)
-    os.chdir(data_dir)
 
     # store some config for later
     #  (i don't really have anywhere better to put it)
     SlaveServer._port = int(port)
     SlaveServer._hostname = gethostname()
     SlaveServer._datadir = data_dir
+
+    _mkdirp(path.join(data_dir, 'storage'))
 
     s = ForkingServer(SlaveServer, port=int(port))
     _register(SlaveServer._hostname, SlaveServer._port)
@@ -286,8 +350,6 @@ def start_slaves(start_port, data_dir_root, num_slaves):
     for p in processes:
         p.join()
 
-
-
 class SlaveServer(rpyc.Service):
 
             ## general utility commands ##
@@ -296,7 +358,7 @@ class SlaveServer(rpyc.Service):
         return 'pong'
 
     def on_connect(self):
-        print 'someone just connected'
+        print self._hostname, self._port, self._datadir, 'someone just connected'
 
         self.exposed_register()
 
@@ -342,20 +404,26 @@ class SlaveServer(rpyc.Service):
             buckets[reducer_num].append((k,v))
 
         for reducer_num in buckets:
-            output_func(reducer_num, buckets[reducer_num], params)
+            output_func(reducer_num, sorted(buckets[reducer_num]), params)
 
         return True
 
 
+    def exposed_reduce(self, \
+                    input_func, sort_func, reduce_func, \
+                    output_func, params):
+
                ## file system commands ##
+        pass
+
 
     def exposed_save(self, file_name, payload, replicate=(REPLICATION_FACTOR - 1)):
 
         _pathcheck(file_name)
 
-        _mkdirp('storage')
 
-        opath = path.join('storage', file_name)
+
+        opath = path.join(self._datadir, 'storage', file_name)
         if path.exists(opath):
             raise OSError("The file '%s' already exists" % file_name)
             return False
@@ -379,13 +447,23 @@ class SlaveServer(rpyc.Service):
     def exposed_fetch(self, file_name):
         _pathcheck(file_name)
 
-        return open(path.join('storage', file_name)).read()
+        try:
+            return open(path.join(self._datadir, 'storage', file_name)).read()
+        except IOError as e:
+            print 'unregistering', file_name, 'because of:', e
+            _unregister_file(self._hostname, self._port, file_name)
+            return None
 
     def exposed_delete(self, file_name):
         _pathcheck(file_name)
 
         _unregister_file(SlaveServer._hostname, SlaveServer._port, file_name)
-        os.remove(path.join('storage', file_name))
+
+        try:
+            os.remove(path.join(self._datadir, 'storage', file_name))
+        except OSError as e:
+            print "you tried to delete", file_name, "but it was already gone.", e
+            return False
 
         return True
 
@@ -393,7 +471,7 @@ class SlaveServer(rpyc.Service):
         _pathcheck(file_name)
 
         c = _connect(*destination)
-        c.root.save(file_name, open(path.join('storage', file_name)).read())
+        c.root.save(file_name, open(path.join(self._datadir, 'storage', file_name)).read())
 
         return True
 
