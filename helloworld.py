@@ -1,18 +1,21 @@
 import mr
-import rpyc
-import glob
-import os.path as path
 
-inputs = [ path.abspath(f) for f in glob.glob('small_testdata/*') ]
-print 'inputs =', inputs
+try:
+    mr.delete('LICENSE')
+except OSError as ose:
+    print 'tried to delete license but it wasnt there'
+
+mr.put('small_testdata/LICENSE.txt', 'LICENSE')
 
 def mapf(k, v, params):
     for tok in v.strip().split():
         yield (tok.lower(), 1)
 
-conn = rpyc.connect('localhost', 52485)
 
-for i in inputs:
-    conn.root.map('b', mr._serialize_function(mr.localfile_linereader), mr._serialize_function(mapf), mr._serialize_function(mr.identity_reducer), mr._serialize_function(mr.hash_partitioner), mr._serialize_function(mr.stdout_kv_output), 2, {'inputfilepath' : i})
+conn = mr._connect(mr.random_slave())
 
+sf = mr._serialize_function
+
+conn.root.map(sf(mr.dfs_linereader), sf(mapf), sf(mr.identity_reducer), sf(mr.hash_partitioner), sf(mr.dfs_linewriter), 2, \
+{'inputfilepath' : 'LICENSE', 'outputdir' : 'helloout'})
 
