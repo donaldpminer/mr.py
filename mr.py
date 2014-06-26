@@ -27,7 +27,7 @@ REDIS_HOST = 'localhost'
 REDIS_PORT = 6379
 REDIS_DB = '10'
 
-USE_SLAVES_CACHE = True
+USE_SLAVES_CACHE = False # this doesn't seem to work too well, don't use it
 
 REPLICATION_FACTOR = 3
 
@@ -180,7 +180,7 @@ def basic_sort(mapper_outputs, params):
 _SLAVES_CACHE = None
 _SLAVES_CACHE_TS = 0
 
-def slaves(timeout=30, cache_expire=60):
+def slaves(timeout=30, cache_expire=60, be_sure=False):
     global _SLAVES_CACHE
     global _SLAVES_CACHE_TS
 
@@ -193,7 +193,7 @@ def slaves(timeout=30, cache_expire=60):
     out_hosts = []
 
     for host in slave_dict:
-        if float(slave_dict[host]) + timeout < curtime:
+        if be_sure or float(slave_dict[host]) + timeout < curtime:
             h,p = host.split(':')
             try:
                 c = _connect(h, int(p))
@@ -212,7 +212,11 @@ def slaves(timeout=30, cache_expire=60):
     return sorted(out_hosts)
 
 def random_slave(*k, **kv):
-    return random.choice(slaves(*k, **kv))
+    ss = slaves(*k, **kv)
+    if len(ss) == 0:
+        raise OSError('There are no slaves currently running, so I can\'t randomly select one')
+    
+    return random.choice(ss)
 
 #### FILE SYSTEM OPS ####
 
@@ -254,7 +258,7 @@ def write(file_name, payload):
     if check_exists(file_name):
         raise OSError('The file "%s" already exists' % file_name)
 
-    a = _connect(*_split_hostport(random.choice(slaves())))
+    a = _connect(*_split_hostport(random_slave()))
     a.root.save(file_name, payload)
 
 def put(local_file, file_name):
@@ -418,7 +422,7 @@ def start_slave(port, data_dir):
 
     _unregister(SlaveServer._hostname, SlaveServer._port)
 
-def start_slaves(start_port, data_dir_root, num_slaves):
+def start_slaves(start_port, data_dir_root, num_slaves, wait=True):
     ports = range(int(start_port), int(start_port) + int(num_slaves))
     processes = []
     for port in ports:
@@ -426,8 +430,12 @@ def start_slaves(start_port, data_dir_root, num_slaves):
         p.start()
         processes.append(p)
 
-    for p in processes:
-        p.join()
+    if wait:
+        for p in processes:
+            p.join()
+
+    else:
+        return processes
 
 class SlaveServer(rpyc.Service):
 
