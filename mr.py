@@ -34,12 +34,22 @@ REPLICATION_FACTOR = 3
 #### UTIL FUNCTIONS ####
 
 def _serialize_function(func):
+    '''Serializes a function. Note that it only serialized the code, not the
+    default arguments or the globals.'''
+
     return marshal.dumps(func.func_code)
 
 def _deserialize_function(sfunc):
+    '''Deserializes a function from _serialize_function. This method returns a function.'''
+
+
     return types.FunctionType(marshal.loads(sfunc), globals())
 
 def _group_sorted(list_of_kv):
+    '''Groups a list of key value pairs by keys. This method assumes that list_of_kv is sorted.
+    For example:  [(1,2),(2,3),(2,4)] -> [ (1, [2]), (2, [3,4]) ]
+    This method produces a generator, not a list.'''
+
     if len(list_of_kv) == 0:
         return
 
@@ -56,6 +66,9 @@ def _group_sorted(list_of_kv):
     yield cur_k, cur_vs
 
 def _mkdirp(path):
+    '''Mimicks the behavior of "mkdir -p". It creates what local directories it needs to create and doens't
+    complain when something already exists.'''
+
     path = path.strip()
     if len(path) == 0:
         raise ValueError("I can't make a directory with no name")
@@ -69,6 +82,8 @@ def _mkdirp(path):
             raise exc
 
 def _pathcheck(file_name):
+    '''Checks to see if 'file_name' is a valid file name for use in our DFS'''
+
     file_name = file_name.strip()
     if len(file_name) == 0:
         raise ValueError("The file name cannot be empty")
@@ -78,19 +93,27 @@ def _pathcheck(file_name):
             raise ValueError("This file name '%s' is not valid, we only accept letters or numbers that are unempty" % file_name)
 
 def _get_redis():
+    '''Returns a redis instance using the defaults provided at the top of mr.py'''
+
     return redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB)
 
 def _get_timestamp():
     return time.time()
 
 def _cat_host(hostname, port):
+    '''Returns a single string containing the host and the port '1.2.3.4:444' from a hostname '1.2.3.4' and a port 444'''
+
     return str(hostname) + ':' + str(port)
 
 def _split_hostport(hostnameport):
+    '''A convenience function that takes a string "x.x.x.x:yyyy' and splits it into "x.x.x.x", yyyy'''
+
     h, p = hostnameport.split(':')
     return h, int(p)
 
 def _connect(hostname, port=None):
+    '''Connects to a rpyc slave. It can either take the form of _connect('1.2.3.4:1234') or _connect('1.2.3.4', 1234)'''
+
     if port is None:
         hostname, port = hostname.split(':')
 
@@ -110,50 +133,62 @@ def _connect(hostname, port=None):
 
 #### STANDARD LIBRARY ####
 
-def empty_input(params):
-    return
-    yield
-
 def identity_mapper(key, val, params):
+    '''Just forwards on the key and value as-is.
+    This is the default mapper used by MapReduce.'''
+
     yield key, val
 
 def identity_reducer(key, values, params):
+    '''Just fowards on the key and value as-is, in a flattened fashion.
+    This is the default reducer used by MapReduce.'''
+
     for v in values:
        yield key, v 
 
 def hash_partitioner(value, num_reducers, params):
+    '''This partitioner hashes the value and mods the number of reducers.
+    This is the default partitioner used by MapReduce.'''
+
     return int(hashlib.sha1(str(value.__hash__())).hexdigest(), 16) % num_reducers
 
-def localfile_linereader(params):
-    return enumerate(open(params['inputfilepath']).xreadlines())
-
 def dfs_linereader(params):
+    '''This reader takes the DFS file and reads it line-by-line. The key is the line number.
+    This is the default input function used by MapReduce'''
+
     return enumerate(read(params['inputfilepath']).splitlines())
 
-def stdout_kv_output(reducer_number, payload, params):
-    print "=" * 40
-    print "Reducer number %d got this payload:" % reducer_number
-    print marshal.dumps(payload)
-    print "=" * 40
-    print
-
 def basic_mapoutput(reducer_number, payload, params):
+    '''This map output function writes data out as a serialized list of key, value tuples.
+    This is the default map output function used by MapReduce.'''
+
     write('%s/tmp/%s/%s' % (params['outputdir'], reducer_number, params['inputfilepath']), marshal.dumps(payload))
 
 def dfs_line_output(reducer_number, payload, params):
+    ''' This reducer output function writes out the key/value pairs separated by tabs, each record on a newline.
+    This is the default reducer output function used by MapReduce. '''
+
     out_str = '\n'.join( str(k) + '\t' + str(v) for k, v in payload )
 
     write('%s/reduce%s' % (params['outputdir'], str(reducer_number).zfill(6)), out_str)
 
 def devnull_output(reducer_number, payload, params):
+    '''This reducer output function does nothing, no matter what is passed to it.'''
+
     pass # "pass" is intentional. this is not a stub.
 
 def basic_shuffle(reducer_number, params):
+    '''Reads the respective reducer's data out of DFS.
+    This is the default shuffle function used by MapReduce.'''
+
     inputs = ls('%s/tmp/%d/*' % (params['outputdir'], int(reducer_number)))
 
     return [ marshal.loads(read(inp)) for inp in inputs ]
 
 def basic_sort(mapper_outputs, params):
+    '''Merges the sorted reducer input files into a single stream of key, values pairs.
+    This is the default merge of MapReduce.'''
+
     # mapper_outputs is a list of k,v sets that are sorted
     cur_vs = []
     cur_k = None
@@ -181,6 +216,13 @@ _SLAVES_CACHE = None
 _SLAVES_CACHE_TS = 0
 
 def slaves(timeout=30, cache_expire=60, be_sure=False):
+    '''
+    Returns a list of slaves that are alive and available.
+    'timeout' (seconds) tells this to check in on a slave if it hasn't registered in a while
+    'cache_expire' (seconds) tells the client how long to keep the cache hot for. Set it to 0 if you don't want to use it.
+    'be_sure' to True makes this method go out and check that each slave is alive. It also forces a register for each.
+    '''
+
     global _SLAVES_CACHE
     global _SLAVES_CACHE_TS
 
