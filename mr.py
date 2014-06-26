@@ -272,7 +272,8 @@ def delete(file_name):
             a = _connect(*_split_hostport(hostport))
             a.root.delete(file_name)
         except Exception as e:
-            print "I tried to delete", file_name, "from", hostport, "but he seems to be gone... I'm going to unregister this file from this host."
+            print "I tried to delete", file_name, "from", hostport, \
+                "but he seems to be gone... I'm going to unregister this file from this host."
 
             _unregister_file( *(_split_hostport(hostport) + (file_name,)) )
 
