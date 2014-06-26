@@ -58,7 +58,7 @@ def _group_sorted(list_of_kv):
 def _mkdirp(path):
     path = path.strip()
     if len(path) == 0:
-        return
+        raise ValueError("I can't make a directory with no name")
 
     try:
         os.makedirs(path)
