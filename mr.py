@@ -42,7 +42,6 @@ def _serialize_function(func):
 def _deserialize_function(sfunc):
     '''Deserializes a function from _serialize_function. This method returns a function.'''
 
-
     return types.FunctionType(marshal.loads(sfunc), globals())
 
 def _group_sorted(list_of_kv):
@@ -92,12 +91,23 @@ def _pathcheck(file_name):
         if not token.isalnum():
             raise ValueError("This file name '%s' is not valid, we only accept letters or numbers that are unempty" % file_name)
 
+_REDIS = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB)
+
 def _get_redis():
     '''Returns a redis instance using the defaults provided at the top of mr.py'''
 
-    return redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB)
+    global _REDIS
+
+    try:
+        _REDIS.ping()
+    except redis.ConnectionError as ce:
+        _REDIS = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB)
+
+    return _REDIS
 
 def _get_timestamp():
+    '''Returns the current timestamp.'''
+
     return time.time()
 
 def _cat_host(hostname, port):
@@ -254,6 +264,9 @@ def slaves(timeout=30, cache_expire=60, be_sure=False):
     return sorted(out_hosts)
 
 def random_slave(*k, **kv):
+    '''Returns a random slave that is available.
+    This is good to use if you don't care who services your request.'''
+
     ss = slaves(*k, **kv)
     if len(ss) == 0:
         raise OSError('There are no slaves currently running, so I can\'t randomly select one')
@@ -263,6 +276,8 @@ def random_slave(*k, **kv):
 #### FILE SYSTEM OPS ####
 
 def _register_file(hostname, port, file_name):
+    '''Registers a file to a hostname with the redis namenode'''
+
     # tell the register host:port has a file
     r = _get_redis()
 
@@ -272,21 +287,34 @@ def _register_file(hostname, port, file_name):
     r.hset('file-' + file_name, '!', '!') 
 
 def _unregister_file(hostname, port, file_name):
+    '''Unregisters a file to a hostname with the redis namenode'''
+
     # tell the register that host:port no longer has a file
     _get_redis().hdel('file-' + file_name, _cat_host(hostname, port))
 
 def format_fs(are_you_sure=False):
+    '''Deletes all files from your DFS, starting from fresh.
+    Set are_you_sure to True to actually run this function.'''
+
     if not are_you_sure:
         raise ValueError("you have to call format_fs(are_you_sure=True) in order to format")
 
     for f in ls():
         delete(f)
 
+    # Just in case we have anything lingering
+    for fname in _get_redis().keys('file-*"'):
+        _get_redis().delete(fname)
+
 def check_exists(file_name):
+    '''Returns true if the file_name exists, False if not.'''
+
     _pathcheck(file_name)
     return _get_redis().exists('file-' + file_name)
 
 def who_has(file_name):
+    '''Returns the list of slaves that are thought to be currently holding the file.'''
+
     _pathcheck(file_name)
 
     if not check_exists(file_name):
@@ -295,6 +323,8 @@ def who_has(file_name):
     return [ h for h in _get_redis().hkeys('file-' + file_name) if h != '!' ]
 
 def write(file_name, payload):
+    '''Write a file with the contents of 'payload' to the file in DFS 'file_name'.'''
+
     _pathcheck(file_name)
 
     if check_exists(file_name):
@@ -304,6 +334,8 @@ def write(file_name, payload):
     a.root.save(file_name, payload)
 
 def put(local_file, file_name):
+    '''Moves the contents of 'local_file' into the DFS file called 'file_name'.'''
+
     _pathcheck(file_name)
 
     write(file_name, open(local_file).read())
@@ -343,12 +375,20 @@ def read(file_name):
     a = _connect(*_split_hostport(random.choice(who_has(file_name))))
     return a.root.fetch(file_name)
 
+def copy(file_name, new_file_name):
+    '''copy the contents of file_name to new_file_name'''
+
+    write(new_file_name, read(file_name))
+
 def get(file_name, local_file):
     _pathcheck(file_name)
 
     open(local_file, 'w').write(read(file_name))
 
 def ls(file_glob = '*'):
+    '''Lists all of the files in the root directory if nothing is passed in.
+    If a parameter is passed into file_glob, then that glob is used.'''
+
     output = []
     for f in _get_redis().keys('file-' + file_glob):
         output.append(f.split('-', 1)[1])
