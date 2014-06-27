@@ -17,11 +17,11 @@ import logging
 import random
 from multiprocessing import Process
 from heapq import merge
-
+from flask import Flask
 
 logging.basicConfig(level='DEBUG')
 
-logging.info("Starting")
+
 
 #### CONFIG ####
 
@@ -98,7 +98,6 @@ _REDIS = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB)
 
 def _get_redis():
     '''Returns a redis instance using the defaults provided at the top of mr.py'''
-
     global _REDIS
 
     try:
@@ -134,7 +133,8 @@ def _connect(hostname, port=None):
         a = rpyc.connect(str(hostname), int(port))
         return a
     except Exception as e:
-        logging.warning(' '.join(['There was a problem connecting to', hostname, str(port), ':', str(e), '... i\'m going to unregister it']))
+        logging.warning(' '.join(['There was a problem connecting to', hostname, str(port), \
+            ':', str(e), '... i\'m going to unregister it']))
 
         _unregister(hostname, port)
 
@@ -222,6 +222,7 @@ def basic_sort(mapper_outputs, params):
 
     yield cur_k, cur_vs
 
+
 #### CLIENTS and APIs ####
 
 _SLAVES_CACHE = None
@@ -231,8 +232,10 @@ def slaves(timeout=30, cache_expire=60, be_sure=False):
     '''
     Returns a list of slaves that are alive and available.
     'timeout' (seconds) tells this to check in on a slave if it hasn't registered in a while
-    'cache_expire' (seconds) tells the client how long to keep the cache hot for. Set it to 0 if you don't want to use it.
-    'be_sure' to True makes this method go out and check that each slave is alive. It also forces a register for each.
+    'cache_expire' (seconds) tells the client how long to keep the cache hot for.
+       Set it to 0 if you don't want to use it.
+    'be_sure' to True makes this method go out and check that each slave is alive.
+       It also forces a register for each.
     '''
 
     global _SLAVES_CACHE
@@ -479,12 +482,18 @@ def _start_reduce(reducer_num, shuffle_func, sort_func, reduce_func, output_func
 def _register(hostname, port):
     ts = _get_timestamp()
 
-    _get_redis().hset("slaves", _cat_host(hostname, port), ts)
- 
+    r = _get_redis()
+
+    r.hset("slaves", _cat_host(hostname, port), ts)
+    r.hdel('deadslaves', _cat_host(hostname, port))
+
     return ts
 
 def _unregister(hostname, port):
-    _get_redis().hdel('slaves', _cat_host(hostname, port))
+    r = _get_redis()
+
+    r.hdel('slaves', _cat_host(hostname, port))
+    r.hset('deadslaves', _cat_host(hostname, port), _get_timestamp())
 
 def start_slave(port, data_dir):
 
@@ -653,6 +662,73 @@ class SlaveServer(rpyc.Service):
 
                               ## slave code ends here ##
 
+#### WEB MONITOR AND CONTROL PAGE ####
+
+
+
+def start_monitor(port):
+    app = Flask('mr.py monitor')
+
+    @app.route("/")
+    def main():
+        contents = []
+
+        contents.append('<h1>mr.py monitor page</h1>')
+
+        contents.append('<h2>slaves</h2><table><tr><td>' + '</td></tr><tr><td>'.join(slaves()) + '</td></tr></table>')
+
+        contents.append('<h2>files</h2><table><tr><td>' + '</td></tr><tr><td>'.join(sorted(ls())) + '</td></tr></table>')
+
+        return '\n'.join(contents)
+
+    app.run(port=int(port))
+
+
+#### SHELL COMMANDS ####
+
+def fs_ls(args):
+    if len(args) == 0:
+        print '\n'.join(ls())
+    else:
+        for f in args:
+            print '\n'.join(ls()) + '\n'
+
+def fs_put(args):
+    local_file = args[0]
+    destn_file = args[1]
+
+    if local_file == '-' :
+        write(destn_file, sys.stdin.read())
+    else:
+        put(local_file, destn_file)
+
+def fs_get(args):
+    source_file = args[0]
+    destn_local_file = args[1]
+
+    get(source_file, destn_local_file)
+
+def fs_cat(args):
+    for fs in args:
+        for f in ls(fs):
+            print read(f),
+
+def fs_rm(args):
+    for f in args:
+        if '*' in f or '?' in f:
+            deletes(f)
+        else:
+            delete(f)
+
+_FS_COMMANDS = {'ls' : fs_ls, 'put' : fs_put, 'get' : fs_get, 'cat' : fs_cat, \
+    'rm' : fs_rm}
+
+
+def file_system_shell(args):
+    _FS_COMMANDS[args[0]](args[1:])
+
+
+
 #### MAIN ####
 
 if __name__ == "__main__":
@@ -662,6 +738,9 @@ if __name__ == "__main__":
         start_slave(sys.argv[2], sys.argv[3])
     elif sys.argv[1] == 'slaves':
         start_slaves(sys.argv[2], sys.argv[3], sys.argv[4])
-
+    elif sys.argv[1] == 'fs':
+        file_system_shell(sys.argv[2:])
+    elif sys.argv[1] == 'monitor':
+        start_monitor(sys.argv[2])
     else:
         print 'you did something wrong'
