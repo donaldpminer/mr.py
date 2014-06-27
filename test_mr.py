@@ -36,7 +36,7 @@ def stop_debug_mini(processes):
 
 def test_empty_slaves():
     # this has to be done before the mini cluster starts
-    assert(len(mr.slaves()) == 0)
+    assert(len(mr.slaves(be_sure=True)) == 0)
 
 
 def test_start_mini():

@@ -19,7 +19,9 @@ from multiprocessing import Process
 from heapq import merge
 
 
-logging.basicConfig()
+logging.basicConfig(level='DEBUG')
+
+logging.info("Starting")
 
 #### CONFIG ####
 
@@ -30,6 +32,7 @@ REDIS_DB = '10'
 USE_SLAVES_CACHE = False # this doesn't seem to work too well, don't use it
 
 REPLICATION_FACTOR = 3
+
 
 #### UTIL FUNCTIONS ####
 
@@ -131,8 +134,7 @@ def _connect(hostname, port=None):
         a = rpyc.connect(str(hostname), int(port))
         return a
     except Exception as e:
-        print 'there was a problem connecting to', hostname, port, ':', e
-        print '   ... i\'m going to unregister it'
+        logging.warning(' '.join(['There was a problem connecting to', hostname, str(port), ':', str(e), '... i\'m going to unregister it']))
 
         _unregister(hostname, port)
 
@@ -251,9 +253,6 @@ def slaves(timeout=30, cache_expire=60, be_sure=False):
                 c = _connect(h, int(p))
                 c.root.register()
             except Exception as e:
-                print 'something seems wrong with', host, e
-                print 'im going to delete', host, 'from the registry'
-                _unregister(h, p)
                 continue
 
         out_hosts.append(host)
@@ -341,6 +340,8 @@ def put(local_file, file_name):
     write(file_name, open(local_file).read())
 
 def delete(file_name):
+    '''Deletes a file from the registery and the slaves.'''
+
     _pathcheck(file_name)
 
     _get_redis().hdel('file-' + file_name, '!')
@@ -350,12 +351,14 @@ def delete(file_name):
             a = _connect(*_split_hostport(hostport))
             a.root.delete(file_name)
         except Exception as e:
-            print "I tried to delete", file_name, "from", hostport, \
-                "but he seems to be gone... I'm going to unregister this file from this host."
+            logging.warning(' '.join(["I tried to delete", file_name, "from", hostport, \
+                "but he seems to be gone... I'm going to unregister this file from this host."]))
 
             _unregister_file( *(_split_hostport(hostport) + (file_name,)) )
 
 def deletes(file_glob):
+    '''Delete multiple files specified by a glob in the registry as well as in the slaves.'''
+
     files_to_del = _get_redis().keys('file-' + file_glob)
     for f in files_to_del:
         delete(f.split('-', 1)[1])
@@ -429,7 +432,7 @@ def mapreduce(inputs, output_dir, \
     params['outputdir'] = output_dir
 
 
-    print 'map stage starting'
+    logging.info('map stage starting')
 
     map_tasks = []
     for ins in inputs:
@@ -442,9 +445,8 @@ def mapreduce(inputs, output_dir, \
     for p in map_tasks:
         p.join()
 
-    print 'map stage complete'
-
-    print 'reduce stage starting'
+    logging.info('map stage complete')
+    logging.info('reduce stage starting')
 
     reduce_tasks = []
     for ri in range(num_reducers):
@@ -455,7 +457,7 @@ def mapreduce(inputs, output_dir, \
     for p in reduce_tasks:
         p.join()
 
-    print 'reduce stage complete'
+    logging.info('reduce stage complete')
     
 
 
@@ -527,12 +529,10 @@ class SlaveServer(rpyc.Service):
         return 'pong'
 
     def on_connect(self):
-        print self._hostname, self._port, self._datadir, 'someone just connected'
-
         self.exposed_register()
 
     def on_disconnect(self):
-        print 'someone just disconnceted'
+        pass
 
     def exposed_register(self):
         # register with redis registry
@@ -627,9 +627,8 @@ class SlaveServer(rpyc.Service):
         try:
             return open(path.join(self._datadir, 'storage', file_name)).read()
         except IOError as e:
-            print 'unregistering', file_name, 'because of:', e
+            logging.warning(' '.join['unregistering', file_name, 'because of:', str(e)])
             _unregister_file(self._hostname, self._port, file_name)
-            return None
 
     def exposed_delete(self, file_name):
         _pathcheck(file_name)
@@ -639,7 +638,7 @@ class SlaveServer(rpyc.Service):
         try:
             os.remove(path.join(self._datadir, 'storage', file_name))
         except OSError as e:
-            print "you tried to delete", file_name, "but it was already gone.", e
+            logging.warning(' '.join["you tried to delete", file_name, "but it was already gone.", str(e)])
             return False
 
         return True
